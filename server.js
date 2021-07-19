@@ -2,21 +2,22 @@ const express = require('express');
 const app = express();
 const fs = require('fs');
 const Joi = require('joi');
-//Lista za spremanje osoba
-var adresar = require('./adresar.json').adresar;
+const bodyParser = require('body-parser');
+//Lista za spremanje osoba u JSON formatu
+var adresarJSON = require('./adresar.json');
+var ID = adresarJSON.id;
+//Iterabilno polje 
+var adresar = adresarJSON.adresar;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
+app.use(bodyParser.json());
 app.listen(3000);
 
-//Home page
-app.get('/', (req, res) => {
-    res.send("Welcome to my API");
-});
 
 // Dohvacanje podataka o svim osobama (dohvacanje adresara)
-app.get('/all', (req,res) => {
+app.get('/', (req,res) => {
     res.json(adresar);
 })
 
@@ -34,51 +35,57 @@ app.post('/add', (req, res) => {
 
     if (error) {
         console.log("greska");
-        var error = {
-            message: error.details[0].message
-        }
-        res.status(400).json(error)
+        res.status(400).json({error: {message: error.details[0].message}});
+        return;
     }
-    else {
-        console.log("uspio");
-        var length = 0;
-        if (adresar) {
-            length = adresar.length;
-        }
 
-        adresar[length] = {
-            person: person,
-            id: length
-        }
-
-        storeToFile(adresar);
-        res.status(200).json(person);
+    console.log("uspio");
+    ID = ID + 1
+    var length = 0;
+    if (adresar) {
+        length = adresar.length;
     }
+
+    adresar[length] = {
+        person: person,
+        id: ID
+    }
+
+    storeToFile(adresar, ID);
+    res.status(200).json(adresar[length]);
 })
 
-//Brisanje osoba iz adresara koje zadovoljavaju parametre
+//Brisanje osoba iz adresara koje odgovaraju ID-u
 app.post('/delete/:id', (req,res) => {
     var id = parseInt(req.params.id);
     var deleted = false;
 
-    for (user of adresar){
-        if (user.id === id) {
-            adresar.splice(id, 1);
+    for (let i = 0; i < adresar.length; i++){
+        if (adresar[i].id === id) {
+            adresar.splice(i, 1);
             deleted = true;
         }
     }
 
     if (deleted) {
-        res.send("Successfully deleted users");
+        storeToFile(adresar, ID);
+        res.status(200).json({message: "Successfully deleted user"});
     }
     else {
-        res.send("No users with that id");
+        res.status(400).json({error: {message: "There are no users with that ID"}});
     }
 })
 
 //Pretraga korisnika prema kontakt podacima
 app.post('/search', (req,res) => {
-    //kljucevi po kojima pretrazujemo (adresa, ime ...)
+    //provjera jesu li poslani dobri podaci
+    var error = validateSearchUpdate(req.body).error;
+
+    if (error) {
+        res.status(400).json({error: {message: error.details[0].message}});
+        return;
+    }
+
     var osobe = findUser(req, adresar);
     res.json(osobe);
 })
@@ -86,17 +93,60 @@ app.post('/search', (req,res) => {
 //Izmjena podataka o korisnicima ovisno o ID-u, vraca update-ani objekt
 app.patch('/update/:id', (req,res) => {
     var id = parseInt(req.params.id);
-    var obj = adresar[id];
-    var person = obj.person;
-    //smijemo mijenjati samo kontakt podatke i adresu
-    var info = Object.keys(req.body);
-
-    for (key of info) {
-        person[key] = req.body[key];
+    var obj = undefined;
+    for (user of adresar) {
+        if (user.id === id) {
+            obj = user;
+        }
     }
 
-    storeToFile(adresar);
+    //provjera postoji li user s tim id-em
+    if (!obj) {
+        res.status(400).json({error: {message: "There are no users with that id"}});
+        return;
+    }
+
+    var person = obj["person"];
+
+    //smijemo mijenjati samo kontakt podatke i adresu
+    var info = Object.keys(req.body);
+    var error = validateSearchUpdate(req.body).error;
+
+    if (error) {
+        res.status(400).json({error: {message: error.details[0].message}});
+        return;
+    }
+
+    for (key of info) {
+        if (key === "address"){
+            person[key] = req.body[key]
+        }
+        else {
+            person["contact"][key] = req.body[key]
+        }
+    }
+
+    storeToFile(adresar, ID);
     res.json(obj);
+})
+
+//Dohvat ID-a prema kontakt podacima korisnika
+app.post('/getID', (req, res) => {
+    var error = validateSearchUpdate(req.body).error;
+
+    //provjera jesu li poslani dobri podaci
+    if (error) {
+        res.status(400).json({error: {message: error.details[0].message}});
+        return;
+    }
+
+    var osobe = findUser(req,adresar);
+    if (osobe.length === 0) {
+        res.status(400).json({error: {message: "There are no users with provided information"}});
+    }
+    else {
+        res.json({id: osobe[0].id});
+    }
 
 })
 
@@ -108,8 +158,8 @@ app.use((req,res,next) => {
 })
 
 //spremanje adresara u memoriju
-function storeToFile (adresar) {
-    fs.writeFile("./adresar.json", JSON.stringify({adresar: adresar}), 'utf8', function (err) {
+function storeToFile (adresar, ID) {
+    fs.writeFile("./adresar.json", JSON.stringify({adresar: adresar, id: ID}), 'utf8', function (err) {
         if (err) {
             console.log(err)
         }
@@ -124,20 +174,34 @@ function validateUser(person) {
         surname: Joi.string().min(3).required(),
         dateOfBirth: Joi.date().iso().max('now').required(),
         address: Joi.string().required(),
-        contact: {
+        contact: Joi.object({
             email: Joi.string().email().required(),
             phoneNumber: Joi.string().length(10).pattern(/^[0-9]+$/).required()
-        }
+        }).required()
     });
 
     return schema.validate(person);
 }
 
-//pronalazanje usera iz adresara po kontakt podacima
+//validacija unosa kontakt podataka i adrese za update i search
+function validateSearchUpdate (person) {
+    const schema = Joi.object({
+        address: Joi.string(),
+        email:Joi.string().email(),
+        phoneNumber: Joi.string().length(10).pattern(/^[0-9]+$/)
+    })
+
+    return schema.validate(person);
+}
+
+/*
+Pronalazanje usera iz adresara po podacima.
+Vraca listu usera koji zadovoljavaju uvjet pretrage.
+*/
 function findUser(req, adresar) {
     var info = Object.keys(req.body);
-    //lista osoba
 
+    //lista osoba
     var osobe = [];
 
     for (user of adresar) {
@@ -154,4 +218,3 @@ function findUser(req, adresar) {
 
     return osobe;
 }
-
